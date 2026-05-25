@@ -9,5 +9,5 @@ chmod +x cert_manager.sh
 or
 
 ```
-bash <(curl -Ls https://raw.githubusercontent.com/UltimateABC/eXterme_Cert_manager/main/cert_manager.sh)
+bash <(curl -Ls https://raw.githubusercontent.com/ExtremeDot/eXterme_Cert_Manager/main/cert_manager.sh)
 ```
