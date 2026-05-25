@@ -57,7 +57,7 @@ if [ -z "$DOMAIN" ]; then
     exit 1
 fi
 
-TARGET_DIR="/root/${DOMAIN}/certs"
+TARGET_DIR="/root/certs/${DOMAIN}"
 
 echo -e "\n${CYAN}Select Validation Method:${NC}"
 echo -e "${GREEN}1)${NC} Standalone Mode (Port 80) - Requires domain pointing to this VPS"
@@ -67,7 +67,9 @@ read -p "$(echo -e ${YELLOW}"Choose method [1 or 2]: "${NC})" METHOD
 # 4. Execution Phase
 echo -e "\n${BLUE}[3/4] Processing Request...${NC}"
 
-# تابع کمکی برای بررسی کپچر کردن خروجی و تشخیص نیاز به force
+# متغیر سراسری برای کنترل وضعیت نهایی صدور گواهی
+IS_SUCCESSFUL=0
+
 run_acme() {
     local force_mode=$1
     local log_file="/tmp/acme_run.log"
@@ -79,12 +81,13 @@ run_acme() {
         
         echo -e "${YELLOW}Requesting SSL via internal standalone webserver...${NC}"
         ~/.acme.sh/acme.sh --issue -d "$DOMAIN" --standalone --insecure $force_mode 2>&1 | tee $log_file
+        local status=${PIPESTATUS[0]}
     else
         echo -e "${CYAN}DNS Manual mode selected. Generating TXT record...${NC}"
         ~/.acme.sh/acme.sh --issue -d "$DOMAIN" --dns --yes-I-know-dns-manual-mode-enough-go-to-auto-issue $force_mode 2>&1 | tee $log_file
+        local status=${PIPESTATUS[0]}
         
-        # اگر در حالت اول به فورس نیاز نداشت و تمدید دستی بود، باید تاییدیه رکورد را بگیریم
-        if ! grep -q "Add '--force' to force renewal" $log_file; then
+        if ! grep -q "Add '--force' to force renewal" $log_file && [ $status -eq 0 ]; then
             echo -e "\n${PURPLE}==================================================${NC}"
             echo -e "${RED}⚠️  CRITICAL ACTION REQUIRED:${NC}"
             echo -e "${YELLOW}1. Log in to your DNS Provider (e.g., Cloudflare).${NC}"
@@ -94,37 +97,51 @@ run_acme() {
             echo -e "${PURPLE}==================================================${NC}"
             read -p "$(echo -e ${GREEN}"After adding the TXT record, wait 60s and press [Enter] to renew/verify... "${NC})"
             ~/.acme.sh/acme.sh --renew -d "$DOMAIN" --yes-I-know-dns-manual-mode-enough-go-to-auto-issue $force_mode 2>&1 | tee $log_file
+            status=${PIPESTATUS[0]}
         fi
     fi
     
-    # بررسی هوشمند متن خروجی برای تشخیص نیاز به --force
+    # تشخیص نیاز به فورس
     if grep -q "Add '--force' to force renewal" $log_file; then
-        echo -e "\n${YELLOW}ℹ Deteted active certificate for $DOMAIN. It's not expired yet.${NC}"
+        echo -e "\n${YELLOW}ℹ Detected active certificate for $DOMAIN. It's not expired yet.${NC}"
         read -p "$(echo -e ${PURPLE}"Do you want to force renew/overwrite it? [y/N]: "${NC})" CONFIRM
         if [[ "$CONFIRM" =~ ^[Yy]$ ]]; then
             echo -e "${YELLOW}Re-running with --force flag...${NC}"
-            run_acme "--force" # فراخوانی بازگشتی با پرچم فورس
+            run_acme "--force"
+            return
         else
             echo -e "${RED}Skipped force renewal by user.${NC}"
-            return 1
+            IS_SUCCESSFUL=0
+            return
         fi
+    fi
+
+    # تنظیم وضعیت نهایی بر اساس وضعیت خروجی واقعی دستور صادرکننده
+    if [ $status -eq 0 ]; then
+        IS_SUCCESSFUL=1
+    else
+        IS_SUCCESSFUL=0
     fi
 }
 
-# اجرای تابع هوشمند
 run_acme ""
-ACME_EXIT_CODE=${PIPESTATUS[0]}
 
 # 5. Export and Summary
-if [ $ACME_EXIT_CODE -eq 0 ] && [ -f "$HOME/.acme.sh/${DOMAIN}_ecc/${DOMAIN}.key" -o -f "$HOME/.acme.sh/${DOMAIN}/${DOMAIN}.key" ]; then
+ACME_SRC_DIR=""
+if [ -d "$HOME/.acme.sh/${DOMAIN}_ecc" ]; then
+    ACME_SRC_DIR="$HOME/.acme.sh/${DOMAIN}_ecc"
+elif [ -d "$HOME/.acme.sh/${DOMAIN}" ]; then
+    ACME_SRC_DIR="$HOME/.acme.sh/${DOMAIN}"
+fi
+
+# فقط در صورت موفقیت کامل و وجود فیزیکی فایل کلید، کپی انجام شود
+if [ $IS_SUCCESSFUL -eq 1 ] && [ ! -z "$ACME_SRC_DIR" ] && [ -f "$ACME_SRC_DIR/${DOMAIN}.key" ]; then
     echo -e "\n${BLUE}[4/4] Exporting certificates to target directory...${NC}"
     
     mkdir -p "$TARGET_DIR"
     
-    # Installing certs to structural paths
-    ~/.acme.sh/acme.sh --install-cert -d "$DOMAIN" \
-        --key-file "$TARGET_DIR/privkey.pem" \
-        --fullchain-file "$TARGET_DIR/fullchain.pem" > /dev/null
+    cp "$ACME_SRC_DIR/${DOMAIN}.key" "$TARGET_DIR/privkey.pem"
+    cp "$ACME_SRC_DIR/fullchain.cer" "$TARGET_DIR/fullchain.pem"
         
     echo -e "\n${GREEN}✔ Certificate successfully issued and saved!${NC}"
     echo -e "${PURPLE}--------------------------------------------------${NC}"
@@ -133,5 +150,6 @@ if [ $ACME_EXIT_CODE -eq 0 ] && [ -f "$HOME/.acme.sh/${DOMAIN}_ecc/${DOMAIN}.key
     echo -e "${GREEN}📜 Fullchain Cert:${NC}   $TARGET_DIR/fullchain.pem"
     echo -e "${PURPLE}--------------------------------------------------${NC}"
 else
-    echo -e "\n${RED}❌ Process finished without generating new files.${NC}"
+    echo -e "\n${RED}❌ Error: Process finished with errors. No files were generated/copied.${NC}"
+    echo -e "${YELLOW}Please verify that Port 80 is completely open on your provider's firewall or use DNS Mode (Method 2).${NC}"
 fi
